@@ -4,7 +4,8 @@ import java.time.LocalDateTime
 
 import cats.effect.{IO, Resource}
 import cats.implicits._
-import io.circe.Json
+import com.redis.RedisClient
+import io.circe.{Json, JsonObject}
 import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.client.dsl.io._
@@ -30,14 +31,20 @@ case class RedditPostData(
 
     val base = s"$title\n#$subreddit$flairPart"
     postType match {
-      case OTHER => "#other\n" ++ base
+      case OTHER => "#other\n" ++ base ++ "\n" ++ s"""<a href="$url">link</a>"""
       case VIDEO => base ++ "\n" ++ s"""<a href="$url">link</a>"""
       case IMAGE => base
     }
   }
 
+  def storeKeys(r: RedisClient): IO[Unit] =
+    IO(r.sadd("reddit:posts", id)) >> IO.delay(
+      println(s"Sent & stored ID $id")
+    )
+
   def sendMessage(botToken: String, chat: String)(
-    client: Resource[IO, Client[IO]]
+    client: Resource[IO, Client[IO]],
+    r: RedisClient
   ): IO[Json] = {
     val msg = UrlForm(
       "chat_id" -> chat,
@@ -49,14 +56,25 @@ case class RedditPostData(
     })
 
     client.use { c =>
-      Uri
+      val jsonResponse = Uri
         .fromString(
           s"https://api.telegram.org/bot$botToken/${postType.method}"
         )
         .map(uri => POST(msg, uri))
         .map(c.expect[Json](_))
-        .recover(e => IO.pure(Json.fromString(e.getMessage)))
-        .getOrElse(IO(Json.Null))
+
+      jsonResponse match {
+        case Right(result) =>
+          result.flatMap(
+            j =>
+              j.hcursor.downField("ok").as[Boolean] match {
+                case Right(isOk) if isOk => storeKeys(r) >> IO.pure(j)
+                case _                   => IO.pure(j)
+            }
+          )
+        case Left(e) =>
+          IO.pure(Json.fromString(e.getMessage))
+      }
     }
   }
 }

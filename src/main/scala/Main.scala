@@ -30,15 +30,24 @@ object Main extends IOApp {
   )(requestMaker: Client[IO] => IO[Json]) =
     clientResourse.use(requestMaker).map(postsOptic.getAll).map(parsePostsData)
 
-  private def sendOrPass(
-    redis: RedisClient
-  )(data: RedditPostData): Option[RedditPostData] = {
-    val key = s"reddit:${data.subreddit}"
-    redis.sismember(key, data.id) match {
-      case true => None
-      case false =>
-        redis.sadd(key, data.id)
-        Some(data)
+  private def findNewPosts(
+    posts: List[RedditPostData]
+  )(implicit r: RedisClient): List[RedditPostData] = {
+    val postIds = posts.map(_.id)
+    val newIdsStore = postIds match {
+      case head :: tail if tail.nonEmpty =>
+        r.sadd("reddit:new_posts", head, tail)
+      case head :: _ => r.sadd("reddit:new_posts", head)
+      case _         => None
+    }
+
+    newIdsStore.flatMap { _ =>
+      r.sdiff("reddit:new_posts", "reddit:posts")
+    }.map(_.toVector.mapFilter((s: Option[String]) => s)) match {
+      case Some(ids) =>
+        r.del("reddit:new_posts")
+        posts.filter(p => ids.contains(p.id))
+      case _ => posts
     }
   }
 
@@ -53,9 +62,8 @@ object Main extends IOApp {
   )
 
   implicit class IOOps[A](f: IO[A]) {
-    def thenWait(d: FiniteDuration): IO[A] = f >>= { v =>
-      IO.sleep(d) >> IO(v)
-    }
+    def tee[B](fb: IO[B]): IO[A] = f >>= (v => fb >> IO(v))
+    def thenWait(d: FiniteDuration): IO[A] = f.tee(IO.sleep(d))
   }
 
   case class TelegramCreds(botToken: String, chatId: String)
@@ -88,15 +96,16 @@ object Main extends IOApp {
     val valueGetter = getNewPosts(client) _
 
     val makeRun = (r: RedisClient, creds: TelegramCreds) => {
-      val sender = sendOrPass(r) _
-
-      getSubreddits(r)
+      val posts = getSubreddits(r)
         .map(createRequestMakers)
         .flatMap(_.map(valueGetter).sequence)
-        .map(_.foldK.mapFilter(sender))
+        .map(_.foldK.filter(_.postType != models.OTHER))
+        .map(findNewPosts(_)(r))
+
+      posts
         .flatMap(
           _.map(
-            _.sendMessage(creds.botToken, creds.chatId)(client)
+            _.sendMessage(creds.botToken, creds.chatId)(client, r)
               .thenWait(3.seconds)
           ).sequence
         )
@@ -111,7 +120,8 @@ object Main extends IOApp {
     } yield run
 
     program.value >>= {
-      case Right(v)  => IO.delay(v.foreach(println)) >> IO.pure(ExitCode.Success)
+      case Right(v) =>
+        IO.delay(println("This run is OK!")) >> IO.pure(ExitCode.Success)
       case Left(exc) => IO.delay(println(exc)) >> IO.pure(ExitCode.Success)
     }
   }
