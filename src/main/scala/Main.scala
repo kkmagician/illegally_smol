@@ -36,19 +36,16 @@ object Main extends IOApp {
     val postIds = posts.map(_.id)
     val newIdsStore = postIds match {
       case head :: tail if tail.nonEmpty =>
-        r.sadd("reddit:new_posts", head, tail)
+        r.sadd("reddit:new_posts", head, tail: _*)
       case head :: _ => r.sadd("reddit:new_posts", head)
       case _         => None
     }
 
-    newIdsStore.flatMap { _ =>
+    val newIds = newIdsStore.flatMap { _ =>
       r.sdiff("reddit:new_posts", "reddit:posts")
-    }.map(_.toVector.mapFilter((s: Option[String]) => s)) match {
-      case Some(ids) =>
-        r.del("reddit:new_posts")
-        posts.filter(p => ids.contains(p.id))
-      case _ => posts
-    }
+    }.getOrElse(Set.empty[Option[String]])
+
+    posts.filter(p => newIds.contains(Some(p.id)))
   }
 
   private val tryConvertInt = (s: String) =>
