@@ -5,7 +5,7 @@ import java.time.LocalDateTime
 import cats.effect.{IO, Resource}
 import cats.implicits._
 import com.redis.RedisClient
-import io.circe.{Json, JsonObject}
+import io.circe.Json
 import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.client.dsl.io._
@@ -45,7 +45,7 @@ case class RedditPostData(
   def sendMessage(botToken: String, chat: String)(
     client: Resource[IO, Client[IO]],
     r: RedisClient
-  ): IO[Json] = {
+  ): IO[String] = {
     val msg = UrlForm(
       "chat_id" -> chat,
       postType.textFieldName -> this.toMessage,
@@ -65,15 +65,15 @@ case class RedditPostData(
 
       jsonResponse match {
         case Right(result) =>
-          result.flatMap(
-            j =>
-              j.hcursor.downField("ok").as[Boolean] match {
-                case Right(isOk) if isOk => storeKeys(r) >> IO.pure(j)
-                case _                   => IO.pure(j)
+          result >>= { j =>
+            j.hcursor.downField("ok").as[Boolean] match {
+              case Right(isOk) if isOk =>
+                storeKeys(r) >> IO.pure(s"Sent $subreddit: $id")
+              case _ => IO.pure(s"Telegram error: ${j.noSpaces}")
             }
-          )
+          }
         case Left(e) =>
-          IO.pure(Json.fromString(e.getMessage))
+          IO.pure(e.getMessage)
       }
     }
   }

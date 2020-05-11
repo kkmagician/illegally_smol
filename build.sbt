@@ -1,6 +1,6 @@
 name := "illegallySmol"
 
-version := "0.2"
+version := "0.21"
 
 scalaVersion := "2.13.2"
 

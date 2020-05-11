@@ -1,3 +1,5 @@
+import java.time.LocalDateTime
+
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import com.redis.RedisClient
@@ -99,15 +101,16 @@ object Main extends IOApp {
         .map(_.foldK.filter(_.postType != models.OTHER))
         .map(findNewPosts(_)(r))
 
-      posts
-        .flatMap(
-          _.map(
+      val sendPosts = posts >>= {
+        case posts if posts.nonEmpty =>
+          posts.map {
             _.sendMessage(creds.botToken, creds.chatId)(client, r)
               .thenWait(3.seconds)
-          ).sequence
-        )
-        .attemptT
-        .leftMap(_.toString)
+          }.sequence
+        case _ => IO(List("No new posts!"))
+      }
+
+      sendPosts.attemptT.leftMap(_.toString)
     }
 
     val program = for {
@@ -118,7 +121,10 @@ object Main extends IOApp {
 
     program.value >>= {
       case Right(v) =>
-        IO.delay(println("This run is OK!")) >> IO.pure(ExitCode.Success)
+        for {
+          messages <- IO(v.map(message => s"${LocalDateTime.now()}: $message"))
+          _        <- IO(messages.foreach(println))
+        } yield ExitCode.Success
       case Left(exc) => IO.delay(println(exc)) >> IO.pure(ExitCode.Success)
     }
   }
