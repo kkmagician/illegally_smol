@@ -1,14 +1,21 @@
 name := "illegallySmol"
 
-version := "0.21"
+version := "0.3"
 
 scalaVersion := "2.13.2"
 
 val circeVersion = "0.13.0"
 val http4sVersion = "0.21.3"
 
+resolvers +=
+  "jcenter".at(
+    "https://jcenter.bintray.com/"
+  )
+
 libraryDependencies ++= Seq(
-  "net.debasishg" %% "redisclient" % "3.20",
+  "net.debasishg"      %% "redisclient" % "3.20",
+  "com.github.poslegm" %% "scala-phash" % "1.2.2",
+  "com.github.kilianB" % "JImageHash" % "3.0.0",
   "org.slf4j" % "slf4j-api" % "1.7.30",
   "org.slf4j" % "slf4j-simple" % "1.7.30"
 ) ++ Seq(

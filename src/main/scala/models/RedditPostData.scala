@@ -1,16 +1,21 @@
 package models
 
+import java.net.URL
 import java.time.LocalDateTime
 
 import cats.effect.{IO, Resource}
 import cats.implicits._
+import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
 import io.circe.Json
+import javax.imageio.ImageIO
 import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.client.dsl.io._
 import org.http4s.Method._
 import org.http4s.{Uri, UrlForm}
+
+import scala.util.Try
 
 case class RedditPostData(
   id: String,
@@ -21,7 +26,8 @@ case class RedditPostData(
   url: String,
   postType: RedditPostType,
   flair: Option[String],
-  crossPostLength: Int
+  crossPostLength: Int,
+  imageHash: Option[String] = None
 ) {
   val toMessage: String = {
     val flairPart = flair match {
@@ -30,17 +36,35 @@ case class RedditPostData(
     }
 
     val base = s"$title\n#$subreddit$flairPart"
+
     postType match {
-      case OTHER => "#other\n" ++ base ++ "\n" ++ s"""<a href="$url">link</a>"""
-      case VIDEO => base ++ "\n" ++ s"""<a href="$url">link</a>"""
+      case VIDEO => base ++ "\n" ++ s"""<a href="$url">video</a>"""
       case IMAGE => base
+      case _     => base
     }
   }
 
+  def attachImageHash(implicit hasher: AverageHash): RedditPostData = postType match {
+    case IMAGE =>
+      val imgHash = for {
+        img  <- Try(ImageIO.read(new URL(url)))
+        hash <- Try(hasher.hash(img).getHashValue.toString)
+      } yield hash
+      this.copy(imageHash = imgHash.toOption)
+    case _ => this
+  }
+
+  val isUnwanted: Boolean = postType match {
+    case IMAGE if imageHash.isDefined => true
+    case VIDEO                        => true
+    case _                            => false
+  }
+
   def storeKeys(r: RedisClient): IO[Unit] =
-    IO(r.sadd("reddit:posts", id)) >> IO.delay(
-      println(s"Sent & stored ID $id")
-    )
+    for {
+      _ <- IO(r.sadd("reddit:posts", id))
+      _ <- IO(imageHash.map(r.sadd("reddit:images", _)))
+    } yield println(s"Sent & stored ID $id")
 
   def sendMessage(botToken: String, chat: String)(
     client: Resource[IO, Client[IO]],
