@@ -1,10 +1,18 @@
-import cats.data.EitherT
-import cats.effect.{IO, Resource}
-import cats.implicits._
+package models
 
+import cats.data.EitherT
+import cats.implicits._
+import cats.effect.{IO, Resource, Timer}
+
+import scala.concurrent.duration.FiniteDuration
 import scala.io.Source
 
 object Ops {
+  implicit class IOOps[A](f: IO[A])(implicit timer: Timer[IO]) {
+    def tee[B](fb: IO[B]): IO[A] = f >>= (v => fb >> IO(v))
+    def thenWait(d: FiniteDuration): IO[A] = f.tee(IO.sleep(d))
+  }
+
   def readDockerSecret(key: String): EitherT[IO, String, String] = {
     val fileResource =
       Resource.fromAutoCloseable(IO(Source.fromFile(s"/run/secrets/$key")))

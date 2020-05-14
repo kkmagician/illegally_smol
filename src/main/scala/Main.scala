@@ -1,5 +1,4 @@
-import java.time.LocalDateTime
-
+import cats.data.{EitherT, OptionT}
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import com.redis.RedisClient
@@ -7,10 +6,15 @@ import io.circe.Json
 import io.circe.optics.JsonPath._
 import org.http4s.client._
 import org.http4s.client.blaze._
-import Ops._
+import org.http4s.client.dsl.io._
+import models.Ops._
 import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
-import models.{RedditPostData, Subreddit, TelegramCreds}
+import models.{AnalyticsEvent, RedditPostData, Subreddit}
 import models.RedditPostDataBuilderObj._
+import models.Telegram.TelegramCreds
+import org.http4s.{BasicCredentials, Uri}
+import org.http4s.Method._
+import org.http4s.headers.Authorization
 
 import scala.concurrent.ExecutionContext.global
 import scala.concurrent.duration._
@@ -47,12 +51,11 @@ object Main extends IOApp {
     }
 
     val newIds = newIdsStore.flatMap { _ =>
-      val postsDiff = r.sdiff("reddit:new_posts", "reddit:posts")
-      val images =
-        r.sdiff("reddit:new_images", "reddit:images").map(_.map(idsPairs.get))
-
-      r.del("reddit:new_posts", "reddit:new_images") >>
-        (postsDiff |+| images)
+      for {
+        postsDiff <- r.sdiff("reddit:new_posts", "reddit:posts")
+        images    <- r.sinter("reddit:new_images", "reddit:images").map(_.map(idsPairs.get))
+        _         <- r.del("reddit:new_posts", "reddit:new_images")
+      } yield postsDiff.diff(images)
     }.getOrElse(Set.empty[Option[String]])
 
     postsWithHash.filter(p => newIds.contains(Some(p.id)))
@@ -67,10 +70,35 @@ object Main extends IOApp {
       .getOrElse(Vector.empty[Subreddit])
   }
 
-  implicit class IOOps[A](f: IO[A]) {
-    def tee[B](fb: IO[B]): IO[A] = f >>= (v => fb >> IO(v))
-    def thenWait(d: FiniteDuration): IO[A] = f.tee(IO.sleep(d))
-  }
+  case class ClickHouse(host: String, user: String, pass: String)
+
+  private def prepareChInsert(
+    ch: ClickHouse,
+    values: Seq[AnalyticsEvent]
+  ) =
+    Uri
+      .fromString(ch.host)
+      .map { u =>
+        POST(
+          "insert into reddit_tg format JSONEachRow\n" ++ values.map(_.toJsonLine).mkString("\n"),
+          u,
+          Authorization(BasicCredentials(ch.user, ch.pass))
+        )
+      }
+      .toOption
+
+  private def sendAnalytics(
+    ch: ClickHouse,
+    values: Seq[AnalyticsEvent],
+    clientRes: Resource[IO, Client[IO]]
+  ): EitherT[IO, String, String] =
+    prepareChInsert(ch, values) match {
+      case Some(req) =>
+        clientRes.use { c =>
+          c.expect[String](req)
+        }.attemptT.leftMap(_.toString)
+      case None => EitherT.leftT[IO, String]("Wrong CH Host")
+    }
 
   override def run(args: List[String]): IO[ExitCode] = {
     implicit val imageHasher: AverageKernelHash = new AverageKernelHash(25) // for now
@@ -104,28 +132,35 @@ object Main extends IOApp {
         .map(_.foldK.filter(_.postType != models.OTHER))
         .flatMap(findNewPosts(_)(r, imageHasher))
 
-      val sendPosts = posts >>= {
-        case posts if posts.nonEmpty =>
-          posts.map {
-            _.sendMessage(creds.botToken, creds.chatId)(client, r).thenWait(2.seconds)
-          }.sequence
-        case _ => IO(List("No new posts!"))
+      val sendPosts = posts >>= { posts =>
+        posts.map {
+          _.sendMessage(creds.botToken, creds.chatId)(client, r).thenWait(2.seconds)
+        }.sequence
       }
 
       sendPosts.attemptT.leftMap(_.toString)
     }
 
+    val clickhouse = for {
+      chHost <- tryFindKey("CH_HOST", Some("localhost"))
+      chUser <- tryFindKey("CH_USER", Some("default"))
+      chPass <- tryFindKey("CH_PASS", Some(""))
+    } yield ClickHouse(chHost, chUser, chPass)
+
     val program = for {
       r     <- redis
+      ch    <- clickhouse
       creds <- telegramCreds
       run   <- makeRun(r, creds)
+      ch    <- sendAnalytics(ch, run, client)
+      _ = println(ch)
     } yield run
 
     program.value >>= {
       case Right(v) =>
         for {
-          messages <- IO(v.map(message => s"${LocalDateTime.now()}: $message"))
-          _        <- IO(messages.foreach(println))
+          jsons <- IO.pure(v.map(_.toJsonLine).mkString("\n"))
+          _     <- IO.delay(println(jsons))
         } yield ExitCode.Success
       case Left(exc) => IO.delay(println(exc)) >> IO.pure(ExitCode.Success)
     }

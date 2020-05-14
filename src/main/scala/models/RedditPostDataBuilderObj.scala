@@ -28,7 +28,10 @@ object RedditPostDataBuilderObj {
         case Some(jsonList) =>
           jsonList
             .mapFilter(_.as[RedditPostDataBuilder].toOption)
-            .map(_.copy(crosspostParentList = None).toData)
+            .map(
+              _.copy(crosspostParentList = None).toData
+                .map(_.copy(crossPostLength = jsonList.length))
+            )
             .foldK
         case _ =>
           val mediaUrl = postHint match {
@@ -48,6 +51,7 @@ object RedditPostDataBuilderObj {
               permalink,
               if (mediaUrl.isDefined) mediaUrl.getOrElse("") else url,
               RedditPostType(postHint),
+              postHint,
               linkFlairText,
               crosspostParentList.map(_.length).getOrElse(0)
             )

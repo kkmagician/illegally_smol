@@ -1,19 +1,19 @@
 package models
 
 import java.net.URL
-import java.time.LocalDateTime
+import java.time.{LocalDateTime, ZoneOffset}
 
 import cats.effect.{IO, Resource}
-import cats.implicits._
 import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
-import io.circe.Json
 import javax.imageio.ImageIO
 import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.client.dsl.io._
 import org.http4s.Method._
 import org.http4s.{Uri, UrlForm}
+import io.circe.generic.auto._
+import models.Telegram.TelegramResponseObj._
 
 import scala.util.Try
 
@@ -25,6 +25,7 @@ case class RedditPostData(
   permalink: String,
   url: String,
   postType: RedditPostType,
+  nativePostType: String,
   flair: Option[String],
   crossPostLength: Int,
   imageHash: Option[String] = None
@@ -35,11 +36,10 @@ case class RedditPostData(
       case None    => ""
     }
 
-    val base = s"$title\n#$subreddit$flairPart"
+    val base = s"$title$flairPart"
 
     postType match {
       case VIDEO => base ++ "\n" ++ s"""<a href="$url">video</a>"""
-      case IMAGE => base
       case _     => base
     }
   }
@@ -67,9 +67,9 @@ case class RedditPostData(
     } yield println(s"Sent & stored ID $id")
 
   def sendMessage(botToken: String, chat: String)(
-    client: Resource[IO, Client[IO]],
+    clientRes: Resource[IO, Client[IO]],
     r: RedisClient
-  ): IO[String] = {
+  ): IO[AnalyticsEvent] = {
     val msg = UrlForm(
       "chat_id" -> chat,
       postType.textFieldName -> this.toMessage,
@@ -79,25 +79,36 @@ case class RedditPostData(
       case _     => None
     })
 
-    client.use { c =>
+    clientRes.use { c =>
       val jsonResponse = Uri
-        .fromString(
-          s"https://api.telegram.org/bot$botToken/${postType.method}"
-        )
+        .fromString(s"https://api.telegram.org/bot$botToken/${postType.method}")
         .map(uri => POST(msg, uri))
-        .map(c.expect[Json](_))
+        .map(resp => c.expect(resp)(jsonOf[IO, TelegramResponse]))
 
       jsonResponse match {
-        case Right(result) =>
-          result >>= { j =>
-            j.hcursor.downField("ok").as[Boolean] match {
-              case Right(isOk) if isOk =>
-                storeKeys(r) >> IO.pure(s"Sent $subreddit: $id")
-              case _ => IO.pure(s"Telegram error: ${j.noSpaces}")
-            }
-          }
+        case Right(resp: IO[TelegramResponse]) =>
+          for {
+            tgResp <- resp
+            _      <- storeKeys(r)
+            analytics <- IO.pure(
+                          AnalyticsEventOk(
+                            tgResp.result.chat.id,
+                            tgResp.result.messageId,
+                            id,
+                            subreddit,
+                            title,
+                            created,
+                            LocalDateTime.ofEpochSecond(tgResp.result.date, 0, ZoneOffset.UTC),
+                            url,
+                            postType.toString,
+                            nativePostType,
+                            flair,
+                            imageHash.flatMap(_.toIntOption)
+                          )
+                        )
+          } yield analytics
         case Left(e) =>
-          IO.pure(e.getMessage)
+          IO.pure(AnalyticsEventError(e.toString))
       }
     }
   }
