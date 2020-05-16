@@ -1,12 +1,12 @@
 package models
 
 import java.net.URL
+import javax.imageio.ImageIO
 import java.time.{LocalDateTime, ZoneOffset}
 
 import cats.effect.{IO, Resource}
 import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
-import javax.imageio.ImageIO
 import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.client.dsl.io._
@@ -67,7 +67,7 @@ case class RedditPostData(
     } yield println(s"Sent & stored ID $id")
 
   def sendMessage(botToken: String, chat: String)(
-    clientRes: Resource[IO, Client[IO]],
+    client: Client[IO],
     r: RedisClient
   ): IO[AnalyticsEvent] = {
     val msg = UrlForm(
@@ -79,37 +79,35 @@ case class RedditPostData(
       case _     => None
     })
 
-    clientRes.use { c =>
-      val jsonResponse = Uri
-        .fromString(s"https://api.telegram.org/bot$botToken/${postType.method}")
-        .map(uri => POST(msg, uri))
-        .map(resp => c.expect(resp)(jsonOf[IO, TelegramResponse]))
+    val jsonResponse = Uri
+      .fromString(s"https://api.telegram.org/bot$botToken/${postType.method}")
+      .map(uri => POST(msg, uri))
+      .map(resp => client.expect(resp)(jsonOf[IO, TelegramResponse]))
 
-      jsonResponse match {
-        case Right(resp: IO[TelegramResponse]) =>
-          for {
-            tgResp <- resp
-            _      <- storeKeys(r)
-            analytics <- IO.pure(
-                          AnalyticsEventOk(
-                            tgResp.result.chat.id,
-                            tgResp.result.messageId,
-                            id,
-                            subreddit,
-                            title,
-                            created,
-                            LocalDateTime.ofEpochSecond(tgResp.result.date, 0, ZoneOffset.UTC),
-                            url,
-                            postType.toString,
-                            nativePostType,
-                            flair,
-                            imageHash.flatMap(_.toIntOption)
-                          )
+    jsonResponse match {
+      case Right(resp: IO[TelegramResponse]) =>
+        for {
+          tgResp <- resp
+          _      <- storeKeys(r)
+          analytics <- IO.pure(
+                        AnalyticsEventOk(
+                          tgResp.result.chat.id,
+                          tgResp.result.messageId,
+                          id,
+                          subreddit,
+                          title,
+                          created,
+                          LocalDateTime.ofEpochSecond(tgResp.result.date, 0, ZoneOffset.UTC),
+                          url,
+                          postType.toString,
+                          nativePostType,
+                          flair,
+                          imageHash.flatMap(_.toIntOption)
                         )
-          } yield analytics
-        case Left(e) =>
-          IO.pure(AnalyticsEventError(e.toString))
-      }
+                      )
+        } yield analytics
+      case Left(e) =>
+        IO.pure(AnalyticsEventError(e.toString))
     }
   }
 }

@@ -1,4 +1,4 @@
-import cats.data.{EitherT, OptionT}
+import cats.data.EitherT
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import com.redis.RedisClient
@@ -33,7 +33,11 @@ object Main extends IOApp {
   private def findNewPosts(
     posts: List[RedditPostData]
   )(implicit r: RedisClient, hasher: AverageHash): IO[List[RedditPostData]] = IO {
-    val postsWithHash = posts.map(_.attachImageHash).filter(_.isUnwanted)
+    val postsWithHash = posts.map(_.attachImageHash).filter(_.isUnwanted).distinctBy {
+      case p: RedditPostData if p.postType == models.IMAGE => p.imageHash
+      case p @ _                                           => p.id
+    }
+
     val idsPairs = postsWithHash.map(p => (p.imageHash, p.id)).toMap
 
     val newIdsStore = postsWithHash.map(_.id) match {
@@ -52,13 +56,14 @@ object Main extends IOApp {
 
     val newIds = newIdsStore.flatMap { _ =>
       for {
-        postsDiff <- r.sdiff("reddit:new_posts", "reddit:posts")
-        images    <- r.sinter("reddit:new_images", "reddit:images").map(_.map(idsPairs.get))
-        _         <- r.del("reddit:new_posts", "reddit:new_images")
-      } yield postsDiff.diff(images)
-    }.getOrElse(Set.empty[Option[String]])
+        postsDiff <- r.sdiff("reddit:new_posts", "reddit:posts").map(_.toVector.mapFilter(a => a))
+        imagesInter <- r.sinter("reddit:new_images", "reddit:images")
+                        .map(_.toVector.mapFilter(a => idsPairs.get(a)))
+        _ <- r.del("reddit:new_posts", "reddit:new_images")
+      } yield postsDiff.diff(imagesInter)
+    }.getOrElse(Vector.empty[String])
 
-    postsWithHash.filter(p => newIds.contains(Some(p.id)))
+    postsWithHash.filter(p => newIds.contains(p.id))
   }
 
   private val tryConvertInt = (s: String) =>
@@ -80,7 +85,7 @@ object Main extends IOApp {
       .fromString(ch.host)
       .map { u =>
         POST(
-          "insert into reddit_tg format JSONEachRow\n" ++ values.map(_.toJsonLine).mkString("\n"),
+          "INSERT INTO reddit_tg FORMAT JSONEachRow\n" ++ values.map(_.toJsonLine).mkString("\n"),
           u,
           Authorization(BasicCredentials(ch.user, ch.pass))
         )
@@ -96,12 +101,12 @@ object Main extends IOApp {
       case Some(req) =>
         clientRes.use { c =>
           c.expect[String](req)
-        }.attemptT.leftMap(_.toString)
+        }.attemptT.leftMap(_.getMessage)
       case None => EitherT.leftT[IO, String]("Wrong CH Host")
     }
 
   override def run(args: List[String]): IO[ExitCode] = {
-    implicit val imageHasher: AverageKernelHash = new AverageKernelHash(25) // for now
+    implicit val imageHasher: AverageKernelHash = new AverageKernelHash(26) // for now
 
     val redis = for {
       redisHost <- tryFindKey("REDIS_HOST", Some("localhost"))
@@ -133,12 +138,14 @@ object Main extends IOApp {
         .flatMap(findNewPosts(_)(r, imageHasher))
 
       val sendPosts = posts >>= { posts =>
-        posts.map {
-          _.sendMessage(creds.botToken, creds.chatId)(client, r).thenWait(2.seconds)
-        }.sequence
+        client.use { c =>
+          posts.map {
+            _.sendMessage(creds.botToken, creds.chatId)(c, r).thenWait(3.seconds)
+          }.sequence
+        }
       }
 
-      sendPosts.attemptT.leftMap(_.toString)
+      sendPosts.attemptT.leftMap(_.getMessage)
     }
 
     val clickhouse = for {
