@@ -1,19 +1,20 @@
-package models
+package models.Reddit
 
 import java.net.URL
-import javax.imageio.ImageIO
 import java.time.{LocalDateTime, ZoneOffset}
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
-import org.http4s.circe._
-import org.http4s.client.Client
-import org.http4s.client.dsl.io._
-import org.http4s.Method._
-import org.http4s.{Uri, UrlForm}
+import javax.imageio.ImageIO
+import models.Analytics._
+import models.Telegram.TelegramResponseObj.TelegramResponse
 import io.circe.generic.auto._
-import models.Telegram.TelegramResponseObj._
+import org.http4s.Method._
+import org.http4s.circe.jsonOf
+import org.http4s.client.Client
+import org.http4s.{Uri, UrlForm}
+import org.http4s.client.dsl.io._
 
 import scala.util.Try
 

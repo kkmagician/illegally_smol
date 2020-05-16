@@ -1,6 +1,7 @@
-package models
+package models.Analytics
 
 import java.time.LocalDateTime
+
 import io.circe.generic.auto._
 import io.circe.syntax._
 

@@ -1,10 +1,10 @@
-package models
+package models.Reddit
 
-import cats.implicits._
 import java.time.{LocalDateTime, ZoneOffset}
 
+import cats.implicits._
 import io.circe.Json
-import io.circe.generic.extras._
+import io.circe.generic.extras.{Configuration, ConfiguredJsonCodec}
 
 object RedditPostDataBuilderObj {
   private implicit val config: Configuration =

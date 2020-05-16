@@ -1,20 +1,26 @@
 import cats.data.EitherT
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
+
 import com.redis.RedisClient
+
 import io.circe.Json
 import io.circe.optics.JsonPath._
+
+import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
+
 import org.http4s.client._
 import org.http4s.client.blaze._
 import org.http4s.client.dsl.io._
-import models.Ops._
-import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
-import models.{AnalyticsEvent, RedditPostData, Subreddit}
-import models.RedditPostDataBuilderObj._
-import models.Telegram.TelegramCreds
 import org.http4s.{BasicCredentials, Uri}
 import org.http4s.Method._
 import org.http4s.headers.Authorization
+
+import models.Ops._
+import models.Analytics.{AnalyticsEvent, Clickhouse}
+import models.Reddit._
+import models.Reddit.RedditPostDataBuilderObj._
+import models.Telegram.TelegramCreds
 
 import scala.concurrent.ExecutionContext.global
 import scala.concurrent.duration._
@@ -30,40 +36,39 @@ object Main extends IOApp {
   )(requestMaker: Client[IO] => IO[Json]) =
     clientResourse.use(requestMaker).map(postsOptic.getAll).map(parsePostsData)
 
+  private def addSetRedis(add: Vector[Any], key: String, r: RedisClient): Option[Long] = add match {
+    case head +: tail if tail.nonEmpty =>
+      r.sadd(key, head, tail: _*)
+    case head +: _ => r.sadd(key, head)
+    case _         => Some(0)
+  }
+
+  private val filterDistinctHash = (posts: Seq[RedditPostData]) =>
+    posts.distinctBy {
+      case p: RedditPostData if p.postType == IMAGE => p.imageHash
+      case p @ _                                    => p.id
+    }.toVector
+
   private def findNewPosts(
     posts: List[RedditPostData]
-  )(implicit r: RedisClient, hasher: AverageHash): IO[List[RedditPostData]] = IO {
-    val postsWithHash = posts.map(_.attachImageHash).filter(_.isUnwanted).distinctBy {
-      case p: RedditPostData if p.postType == models.IMAGE => p.imageHash
-      case p @ _                                           => p.id
-    }
+  )(implicit r: RedisClient, hasher: AverageHash): IO[Vector[RedditPostData]] = IO {
+    val newPosts = for {
+      postsVec      <- Some(posts.toVector)
+      _             <- addSetRedis(postsVec.map(_.id), "reddit:new_posts", r)
+      newPostIds    <- r.sdiff("reddit:new_posts", "reddit:posts").map(_.toVector.mapFilter(a => a))
+      newPosts      <- Some(postsVec.filter(p => newPostIds.contains(p.id)))
+      postsWithHash <- Some(filterDistinctHash(newPosts.map(_.attachImageHash)))
+      _             <- addSetRedis(postsWithHash.mapFilter(_.imageHash), "reddit:new_images", r)
+      newImages     <- r.sdiff("reddit:new_images", "reddit:images").map(_.toVector.mapFilter(a => a))
+      _             <- r.del("reddit:new_images", "reddit:new_posts")
+      finalPosts <- Some(postsWithHash.filter {
+                     case p: RedditPostData if p.postType == IMAGE =>
+                       newImages.contains(p.imageHash.getOrElse(""))
+                     case _ => true
+                   })
+    } yield finalPosts
 
-    val idsPairs = postsWithHash.map(p => (p.imageHash, p.id)).toMap
-
-    val newIdsStore = postsWithHash.map(_.id) match {
-      case head :: tail if tail.nonEmpty =>
-        r.sadd("reddit:new_posts", head, tail: _*)
-      case head :: _ => r.sadd("reddit:new_posts", head)
-      case _         => None
-    }
-
-    postsWithHash.mapFilter(_.imageHash) match {
-      case head :: tail if tail.nonEmpty =>
-        r.sadd("reddit:new_images", head, tail: _*)
-      case head :: _ => r.sadd("reddit:new_images", head)
-      case _         => None
-    }
-
-    val newIds = newIdsStore.flatMap { _ =>
-      for {
-        postsDiff <- r.sdiff("reddit:new_posts", "reddit:posts").map(_.toVector.mapFilter(a => a))
-        imagesInter <- r.sinter("reddit:new_images", "reddit:images")
-                        .map(_.toVector.mapFilter(a => idsPairs.get(a)))
-        _ <- r.del("reddit:new_posts", "reddit:new_images")
-      } yield postsDiff.diff(imagesInter)
-    }.getOrElse(Vector.empty[String])
-
-    postsWithHash.filter(p => newIds.contains(p.id))
+    newPosts.getOrElse(Vector.empty[RedditPostData])
   }
 
   private val tryConvertInt = (s: String) =>
@@ -71,21 +76,21 @@ object Main extends IOApp {
 
   private def getSubredditsM(r: RedisClient): IO[Vector[Subreddit]] = IO {
     r.hgetall1[String, String]("reddit:subreddits")
-      .map(_.toVector.map { case (n, f) => models.Subreddit(n, f) })
+      .map(_.toVector.map { case (n, f) => Subreddit(n, f) })
       .getOrElse(Vector.empty[Subreddit])
   }
 
-  case class ClickHouse(host: String, user: String, pass: String)
-
   private def prepareChInsert(
-    ch: ClickHouse,
+    ch: Clickhouse,
     values: Seq[AnalyticsEvent]
   ) =
     Uri
       .fromString(ch.host)
       .map { u =>
         POST(
-          "INSERT INTO reddit_tg FORMAT JSONEachRow\n" ++ values.map(_.toJsonLine).mkString("\n"),
+          s"INSERT INTO ${ch.table} FORMAT JSONEachRow\n" ++ values
+            .map(_.toJsonLine)
+            .mkString("\n"),
           u,
           Authorization(BasicCredentials(ch.user, ch.pass))
         )
@@ -93,7 +98,7 @@ object Main extends IOApp {
       .toOption
 
   private def sendAnalytics(
-    ch: ClickHouse,
+    ch: Clickhouse,
     values: Seq[AnalyticsEvent],
     clientRes: Resource[IO, Client[IO]]
   ): EitherT[IO, String, String] =
@@ -134,7 +139,7 @@ object Main extends IOApp {
     val makeRun = (r: RedisClient, creds: TelegramCreds) => {
       val posts = getSubredditsM(r)
         .flatMap(_.map(s => valueGetter(s.makeRequestF)).sequence)
-        .map(_.foldK.filter(_.postType != models.OTHER))
+        .map(_.foldK.filter(_.postType != OTHER))
         .flatMap(findNewPosts(_)(r, imageHasher))
 
       val sendPosts = posts >>= { posts =>
@@ -149,10 +154,11 @@ object Main extends IOApp {
     }
 
     val clickhouse = for {
-      chHost <- tryFindKey("CH_HOST", Some("localhost"))
-      chUser <- tryFindKey("CH_USER", Some("default"))
-      chPass <- tryFindKey("CH_PASS", Some(""))
-    } yield ClickHouse(chHost, chUser, chPass)
+      chHost  <- tryFindKey("CH_HOST", Some("localhost"))
+      chUser  <- tryFindKey("CH_USER", Some("default"))
+      chPass  <- tryFindKey("CH_PASS", Some(""))
+      chTable <- tryFindKey("CH_TABLE", Some("reddit_tg"))
+    } yield Clickhouse(chHost, chUser, chPass, chTable)
 
     val program = for {
       r     <- redis

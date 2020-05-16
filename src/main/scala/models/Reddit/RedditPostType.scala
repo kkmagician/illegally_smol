@@ -1,4 +1,4 @@
-package models
+package models.Reddit
 
 sealed abstract class RedditPostType {
   val method: String = "sendMessage"

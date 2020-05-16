@@ -1,9 +1,9 @@
-package models
+package models.Reddit
 
 import cats.effect.IO
 import io.circe.Json
-import org.http4s.client.Client
 import org.http4s.circe._
+import org.http4s.client.Client
 
 sealed abstract class Feed
 case object New extends Feed {
