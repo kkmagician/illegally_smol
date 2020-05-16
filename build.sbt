@@ -36,7 +36,7 @@ enablePlugins(JavaAppPackaging)
 
 packageName in Docker := "illegallysmolcats"
 version in Docker := version.value
-dockerBaseImage := "openjdk:15-oracle"
+dockerBaseImage := "openjdk:15-slim"
 dockerRepository := Some("registry.gitlab.com")
 dockerUsername := Some("awfrke")
 dockerUpdateLatest := true
