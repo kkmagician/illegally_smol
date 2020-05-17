@@ -3,16 +3,20 @@ import java.time.LocalDateTime
 import cats.data.EitherT
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
+
 import com.redis.RedisClient
 import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
+
 import io.circe.Json
 import io.circe.optics.JsonPath._
+
 import org.http4s.client._
 import org.http4s.client.blaze._
 import org.http4s.client.dsl.io._
 import org.http4s.{BasicCredentials, Uri}
 import org.http4s.Method._
 import org.http4s.headers.Authorization
+
 import models.Ops._
 import models.Analytics.{AnalyticsEvent, Clickhouse}
 import models.Reddit._
@@ -53,16 +57,28 @@ object Main extends IOApp {
       postsVec   <- Some(posts.toVector)
       _          <- addSetRedis(postsVec.map(_.id), "reddit:new_posts", r)
       newPostIds <- r.sdiff("reddit:new_posts", "reddit:posts").map(_.toVector.mapFilter(a => a))
+
       _ = println(s"${LocalDateTime.now()}: Found ${newPostIds.length} new posts")
+
       newPosts      <- Some(postsVec.filter(p => newPostIds.contains(p.id)))
       postsWithHash <- Some(filterDistinctHash(newPosts.map(_.attachImageHash)))
+
       _ = println(s"${LocalDateTime.now()}: Hashed ${postsWithHash.length} images")
+
       _         <- addSetRedis(postsWithHash.mapFilter(_.imageHash), "reddit:new_images", r)
       newImages <- r.sdiff("reddit:new_images", "reddit:images").map(_.toVector.mapFilter(a => a))
-      _         <- r.del("reddit:new_images", "reddit:new_posts")
+      oldImagesPosts <- Some(
+                         postsWithHash.mapFilter { p =>
+                           p.imageHash
+                             .map(!newImages.contains(_))
+                             .flatMap(if (_) Some(p.id) else None)
+                         }
+                       )
+      _ <- addSetRedis(oldImagesPosts, "reddit:posts", r)
+      _ <- r.del("reddit:new_images", "reddit:new_posts")
       finalPosts <- Some(postsWithHash.filter {
                      case p: RedditPostData if p.postType == IMAGE =>
-                       newImages.contains(p.imageHash.getOrElse(""))
+                       newImages.contains(p.imageHash.getOrElse("z"))
                      case _ => true
                    })
       _ = println(s"${LocalDateTime.now()}: Sending ${finalPosts.length} messages")

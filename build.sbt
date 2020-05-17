@@ -1,5 +1,5 @@
 name := "illegallySmol"
-version := "0.43"
+version := "0.44"
 scalaVersion := "2.13.2"
 
 val circeVersion = "0.13.0"

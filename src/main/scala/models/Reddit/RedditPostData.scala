@@ -2,11 +2,11 @@ package models.Reddit
 
 import java.net.URL
 import java.time.{LocalDateTime, ZoneOffset}
+import javax.imageio.ImageIO
 
 import cats.effect.IO
 import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
-import javax.imageio.ImageIO
 import models.Analytics._
 import models.Telegram.TelegramResponseObj.TelegramResponse
 import io.circe.generic.auto._
@@ -38,10 +38,12 @@ case class RedditPostData(
     }
 
     val base = s"$title$flairPart"
+    val attachLink = (base: String, name: String) => base ++ "\n" ++ s"""<a href="$url">$name</a>"""
 
     postType match {
-      case VIDEO => base ++ "\n" ++ s"""<a href="$url">video</a>"""
-      case _     => base
+      case VIDEO                         => attachLink(base, "video")
+      case IMAGE if url.endsWith(".gif") => attachLink(base, "gif")
+      case _                             => base
     }
   }
 
