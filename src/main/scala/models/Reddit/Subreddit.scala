@@ -6,11 +6,9 @@ import org.http4s.circe._
 import org.http4s.client.Client
 
 sealed abstract class Feed
-case object New extends Feed {
-  override def toString: String = "new"
-}
-case object Hot extends Feed {
-  override def toString: String = "hot"
+object Feed {
+  case object `new` extends Feed
+  case object hot extends Feed
 }
 
 case class Subreddit(name: String, feed: Feed) {
@@ -20,7 +18,7 @@ case class Subreddit(name: String, feed: Feed) {
 
 object Subreddit {
   def apply(name: String, feed: String): Subreddit = feed match {
-    case "hot" => Subreddit(name, Hot)
-    case _     => Subreddit(name, New)
+    case "hot" => Subreddit(name, Feed.hot)
+    case _     => Subreddit(name, Feed.`new`)
   }
 }

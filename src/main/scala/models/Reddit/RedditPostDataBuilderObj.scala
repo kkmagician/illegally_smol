@@ -19,7 +19,7 @@ object RedditPostDataBuilderObj {
     createdUtc: Float,
     permalink: String,
     url: String,
-    postHint: String,
+    postHint: Option[String],
     media: Option[Json],
     linkFlairText: Option[String]
   ) {
@@ -35,11 +35,11 @@ object RedditPostDataBuilderObj {
             .foldK
         case _ =>
           val mediaUrl = postHint match {
-            case "hosted:video" =>
+            case Some("hosted:video") | None =>
               media.flatMap { j =>
                 j.hcursor.downField("reddit_video").downField("fallback_url").as[String].toOption
-              }
-            case _ => None
+              }.getOrElse(url)
+            case _ => url
           }
 
           List(
@@ -49,8 +49,8 @@ object RedditPostDataBuilderObj {
               title,
               LocalDateTime.ofEpochSecond(createdUtc.toLong, 0, ZoneOffset.UTC),
               permalink,
-              if (mediaUrl.isDefined) mediaUrl.getOrElse("") else url,
-              RedditPostType(postHint),
+              mediaUrl,
+              RedditPostType(postHint, mediaUrl),
               postHint,
               linkFlairText,
               crosspostParentList.map(_.length).getOrElse(0)

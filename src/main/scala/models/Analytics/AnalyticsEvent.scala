@@ -19,7 +19,7 @@ case class AnalyticsEventOk(
   messageSentTime: LocalDateTime,
   url: String,
   postType: String,
-  nativePostType: String,
+  nativePostType: Option[String],
   flair: Option[String],
   imageHash: Option[Int]
 ) extends AnalyticsEvent {

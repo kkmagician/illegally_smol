@@ -26,7 +26,7 @@ case class RedditPostData(
   permalink: String,
   url: String,
   postType: RedditPostType,
-  nativePostType: String,
+  nativePostType: Option[String],
   flair: Option[String],
   crossPostLength: Int,
   imageHash: Option[String] = None
@@ -41,14 +41,14 @@ case class RedditPostData(
     val attachLink = (base: String, name: String) => base ++ "\n" ++ s"""<a href="$url">$name</a>"""
 
     postType match {
-      case VIDEO                         => attachLink(base, "video")
-      case IMAGE if url.endsWith(".gif") => attachLink(base, "gif")
-      case _                             => base
+      case VIDEO => attachLink(base, "video")
+      case GIF   => attachLink(base, "gif")
+      case _     => base
     }
   }
 
   def attachImageHash(implicit hasher: AverageHash): RedditPostData = postType match {
-    case IMAGE =>
+    case IMAGE | GIF =>
       val imgHash = for {
         img  <- Try(ImageIO.read(new URL(url)))
         hash <- Try(hasher.hash(img).getHashValue.toString)
@@ -58,9 +58,9 @@ case class RedditPostData(
   }
 
   val isUnwanted: Boolean = postType match {
-    case IMAGE if imageHash.isDefined => true
-    case VIDEO                        => true
-    case _                            => false
+    case IMAGE | GIF if imageHash.isDefined => true
+    case VIDEO                              => true
+    case _                                  => false
   }
 
   def storeKeys(r: RedisClient): IO[Unit] =

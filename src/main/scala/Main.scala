@@ -46,8 +46,8 @@ object Main extends IOApp {
 
   private val filterDistinctHash = (posts: Seq[RedditPostData]) =>
     posts.distinctBy {
-      case p: RedditPostData if p.postType == IMAGE => p.imageHash
-      case p @ _                                    => p.id
+      case p: RedditPostData if List(IMAGE, GIF).contains(p.postType) => p.imageHash
+      case p @ _                                                      => p.id
     }.toVector
 
   private def findNewPosts(
@@ -77,7 +77,7 @@ object Main extends IOApp {
       _ <- addSetRedis(oldImagesPosts, "reddit:posts", r)
       _ <- r.del("reddit:new_images", "reddit:new_posts")
       finalPosts <- Some(postsWithHash.filter {
-                     case p: RedditPostData if p.postType == IMAGE =>
+                     case p: RedditPostData if List(IMAGE, GIF).contains(p.postType) =>
                        newImages.contains(p.imageHash.getOrElse("z"))
                      case _ => true
                    })
@@ -153,14 +153,23 @@ object Main extends IOApp {
     val valueGetter = getNewPosts(client) _
 
     val makeRun = (r: RedisClient, creds: TelegramCreds) => {
-      val posts = getSubredditsM(r)
-        .flatMap(_.map(s => valueGetter(s.makeRequestF)).sequence)
-        .map(_.foldK.filter(_.postType != OTHER))
-        .flatMap(findNewPosts(_)(r, imageHasher))
+//      val posts = getSubredditsM(r)
+//        .flatMap(v => IO.delay(println(v)) >> IO(v))
+//        .flatMap(_.map(s => valueGetter(s.makeRequestF)).sequence)
+//        .map(_.foldK.filter(_.postType != OTHER))
+//        .flatMap(findNewPosts(_)(r, imageHasher))
 
-      val sendPosts = posts >>= { posts =>
+      val posts = for {
+        subreddits    <- getSubredditsM(r)
+        _             <- IO(println(subreddits))
+        fetchedPosts  <- subreddits.map(s => valueGetter(s.makeRequestF)).sequence
+        filteredPosts <- IO(fetchedPosts.foldK.filter(_.postType != OTHER))
+        newPosts      <- findNewPosts(filteredPosts)(r, imageHasher)
+      } yield newPosts
+
+      val sendPosts = posts >>= { ps =>
         client.use { c =>
-          posts.map {
+          ps.map {
             _.sendMessage(creds.botToken, creds.chatId)(c, r).thenWait(3.seconds)
           }.sequence
         }
