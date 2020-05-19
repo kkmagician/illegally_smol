@@ -2,16 +2,19 @@ package models.Reddit
 
 import java.net.URL
 import java.time.{LocalDateTime, ZoneOffset}
-import javax.imageio.ImageIO
 
+import javax.imageio.ImageIO
 import cats.effect.IO
+import cats.implicits._
 import com.github.kilianB.hashAlgorithms.AverageHash
 import com.redis.RedisClient
+import io.circe.Json
 import models.Analytics._
 import models.Telegram.TelegramResponseObj.TelegramResponse
 import io.circe.generic.auto._
+import models.Telegram.{TelegramError, TelegramResp}
 import org.http4s.Method._
-import org.http4s.circe.jsonOf
+import org.http4s.circe._
 import org.http4s.client.Client
 import org.http4s.{Uri, UrlForm}
 import org.http4s.client.dsl.io._
@@ -85,7 +88,9 @@ case class RedditPostData(
     val jsonResponse = Uri
       .fromString(s"https://api.telegram.org/bot$botToken/${postType.method}")
       .map(uri => POST(msg, uri))
-      .map(resp => client.expect(resp)(jsonOf[IO, TelegramResponse]))
+      .map(req => {
+        client.fetchAs[TelegramResponse](req)(jsonOf[IO, TelegramResponse])
+      })
 
     jsonResponse match {
       case Right(resp: IO[TelegramResponse]) =>
@@ -110,7 +115,7 @@ case class RedditPostData(
                       )
         } yield analytics
       case Left(e) =>
-        IO.pure(AnalyticsEventError(e.toString))
+        IO.pure(AnalyticsEventError(e.getMessage))
     }
   }
 }

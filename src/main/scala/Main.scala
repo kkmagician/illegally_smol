@@ -153,12 +153,6 @@ object Main extends IOApp {
     val valueGetter = getNewPosts(client) _
 
     val makeRun = (r: RedisClient, creds: TelegramCreds) => {
-//      val posts = getSubredditsM(r)
-//        .flatMap(v => IO.delay(println(v)) >> IO(v))
-//        .flatMap(_.map(s => valueGetter(s.makeRequestF)).sequence)
-//        .map(_.foldK.filter(_.postType != OTHER))
-//        .flatMap(findNewPosts(_)(r, imageHasher))
-
       val posts = for {
         subreddits    <- getSubredditsM(r)
         _             <- IO(println(subreddits))
