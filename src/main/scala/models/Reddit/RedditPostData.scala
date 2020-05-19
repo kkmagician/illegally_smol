@@ -12,7 +12,6 @@ import io.circe.Json
 import models.Analytics._
 import models.Telegram.TelegramResponseObj.TelegramResponse
 import io.circe.generic.auto._
-import models.Telegram.{TelegramError, TelegramResp}
 import org.http4s.Method._
 import org.http4s.circe._
 import org.http4s.client.Client
