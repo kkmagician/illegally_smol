@@ -1,22 +1,19 @@
 import java.time.LocalDateTime
 
 import cats.data.EitherT
+import cats.data.Validated.Valid
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
-
 import com.redis.RedisClient
 import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
-
 import io.circe.Json
 import io.circe.optics.JsonPath._
-
 import org.http4s.client._
 import org.http4s.client.blaze._
 import org.http4s.client.dsl.io._
 import org.http4s.{BasicCredentials, Uri}
 import org.http4s.Method._
 import org.http4s.headers.Authorization
-
 import models.Ops._
 import models.Analytics.{AnalyticsEvent, Clickhouse}
 import models.Reddit._
@@ -164,7 +161,14 @@ object Main extends IOApp {
       val sendPosts = posts >>= { ps =>
         client.use { c =>
           ps.map {
-            _.sendMessage(creds.botToken, creds.chatId)(c, r).thenWait(3.seconds)
+            _.sendMessage(creds.botToken, creds.chatId)(c, r)
+              .thenWait(3.seconds)
+              .attemptT
+              .leftMap(err => {
+                println(err.getMessage)
+                err
+              })
+              .value
           }.sequence
         }
       }
@@ -184,14 +188,14 @@ object Main extends IOApp {
       ch    <- clickhouse
       creds <- telegramCreds
       run   <- makeRun(r, creds)
-      ch    <- sendAnalytics(ch, run, client)
+      ch    <- sendAnalytics(ch, run.mapFilter(_.toOption), client)
       _ = println(ch)
     } yield run
 
     program.value >>= {
       case Right(v) =>
         for {
-          jsons <- IO.pure(v.map(_.toJsonLine).mkString("\n"))
+          jsons <- IO.pure(v.mapFilter(_.toOption.map(_.toJsonLine)).mkString("\n"))
           _     <- IO.delay(println(jsons))
         } yield ExitCode.Success
       case Left(exc) =>
