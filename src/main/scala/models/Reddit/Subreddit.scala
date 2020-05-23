@@ -2,6 +2,7 @@ package models.Reddit
 
 import cats.effect.IO
 import io.circe.Json
+import models.Reddit.RedditPostDataBuilderObj.RedditPostDataBuilder
 import org.http4s.circe._
 import org.http4s.client.Client
 

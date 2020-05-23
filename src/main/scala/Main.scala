@@ -1,21 +1,21 @@
 import java.time.LocalDateTime
 
 import cats.data.EitherT
-import cats.data.Validated.Valid
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, Resource}
+
 import com.redis.RedisClient
 import com.github.kilianB.hashAlgorithms.{AverageHash, AverageKernelHash}
+
 import io.circe.Json
 import io.circe.optics.JsonPath._
+
 import org.http4s.client._
 import org.http4s.client.blaze._
-import org.http4s.client.dsl.io._
-import org.http4s.{BasicCredentials, Uri}
-import org.http4s.Method._
-import org.http4s.headers.Authorization
+
 import models.Ops._
 import models.Analytics.{AnalyticsEvent, Clickhouse}
+import models.Analytics.Clickhouse._
 import models.Reddit._
 import models.Reddit.RedditPostDataBuilderObj._
 import models.Telegram.TelegramCreds
@@ -29,10 +29,17 @@ object Main extends IOApp {
   private val parsePostsData = (l: List[Json]) =>
     l.map(_.as[RedditPostDataBuilder]).mapFilter(_.toOption.map(_.toData)).foldK
 
-  private def getNewPosts(
+  private def getNewPostsF(
+    subreddits: Seq[Subreddit],
     clientResourse: Resource[IO, Client[IO]]
-  )(requestMaker: Client[IO] => IO[Json]) =
-    clientResourse.use(requestMaker).map(postsOptic.getAll).map(parsePostsData)
+  ): IO[List[RedditPostData]] =
+    clientResourse.use { client =>
+      subreddits
+        .map(_.makeRequestF(client).map(postsOptic.getAll).map(parsePostsData))
+        .toVector
+        .sequence
+        .map(_.foldK)
+    }
 
   private def addSetRedis(add: Vector[Any], key: String, r: RedisClient): Option[Long] = add match {
     case head +: tail if tail.nonEmpty =>
@@ -87,41 +94,12 @@ object Main extends IOApp {
   private val tryConvertInt = (s: String) =>
     IO(s.toIntOption.toRight[String]("Could not convert a key to Int"))
 
-  private def getSubredditsM(r: RedisClient): IO[Vector[Subreddit]] = IO {
-    r.hgetall1[String, String]("reddit:subreddits")
-      .map(_.toVector.map { case (n, f) => Subreddit(n, f) })
-      .getOrElse(Vector.empty[Subreddit])
-  }
-
-  private def prepareChInsert(
-    ch: Clickhouse,
-    values: Seq[AnalyticsEvent]
-  ) =
-    Uri
-      .fromString(ch.host)
-      .map { u =>
-        POST(
-          s"INSERT INTO ${ch.table} FORMAT JSONEachRow\n" ++ values
-            .map(_.toJsonLine)
-            .mkString("\n"),
-          u,
-          Authorization(BasicCredentials(ch.user, ch.pass))
-        )
-      }
-      .toOption
-
-  private def sendAnalytics(
-    ch: Clickhouse,
-    values: Seq[AnalyticsEvent],
-    clientRes: Resource[IO, Client[IO]]
-  ): EitherT[IO, String, String] =
-    prepareChInsert(ch, values) match {
-      case Some(req) =>
-        clientRes.use { c =>
-          c.expect[String](req)
-        }.attemptT.leftMap(_.getMessage)
-      case None => EitherT.leftT[IO, String]("Wrong CH Host")
-    }
+  private def getSubredditsM(r: RedisClient): EitherT[IO, String, Vector[Subreddit]] =
+    IO {
+      r.hgetall1[String, String]("reddit:subreddits")
+        .map(_.toVector.map { case (n, f) => Subreddit(n, f) })
+        .getOrElse(Vector.empty[Subreddit])
+    }.attemptT.leftMap(_.getMessage)
 
   override def run(args: List[String]): IO[ExitCode] = {
     implicit val imageHasher: AverageKernelHash = new AverageKernelHash(26) // for now
@@ -147,14 +125,12 @@ object Main extends IOApp {
     } yield TelegramCreds(botToken, chatID)
 
     val client = BlazeClientBuilder[IO](global).resource
-    val valueGetter = getNewPosts(client) _
 
-    val makeRun = (r: RedisClient, creds: TelegramCreds) => {
+    val makeRun = (subreddits: Vector[Subreddit], r: RedisClient, creds: TelegramCreds) => {
       val posts = for {
-        subreddits    <- getSubredditsM(r)
-        _             <- IO(println(subreddits))
-        fetchedPosts  <- subreddits.map(s => valueGetter(s.makeRequestF)).sequence
-        filteredPosts <- IO(fetchedPosts.foldK.filter(_.postType != OTHER))
+        _             <- IO(println(subreddits.mkString(", ")))
+        fetchedPosts  <- getNewPostsF(subreddits, client)
+        filteredPosts <- IO(fetchedPosts.filter(_.postType != OTHER))
         newPosts      <- findNewPosts(filteredPosts)(r, imageHasher)
       } yield newPosts
 
@@ -181,14 +157,37 @@ object Main extends IOApp {
       chUser  <- tryFindKey("CH_USER", Some("default"))
       chPass  <- tryFindKey("CH_PASS", Some(""))
       chTable <- tryFindKey("CH_TABLE", Some("reddit_tg"))
-    } yield Clickhouse(chHost, chUser, chPass, chTable)
+      chSet   <- tryFindKey("CH_SET", Some("sets.subreddits"))
+    } yield Clickhouse(chHost, chUser, chPass, chTable, chSet)
+
+    def analyticsInserts(
+      ch: Clickhouse,
+      events: Seq[AnalyticsEvent],
+      subreddits: Seq[Subreddit],
+      clientRes: Resource[IO, Client[IO]]
+    ): EitherT[IO, String, String] =
+      if (events.nonEmpty) {
+        val eventsQuery = makeChAnalyticsQuery(events, ch.table)
+        val subredditsSetQuery = makeSubredditsSetQuery(subreddits, ch.setTable)
+
+        val response = clientRes.use { client =>
+          val resp = for {
+            events <- sendAnalytics(ch, eventsQuery, client)
+            set    <- sendAnalytics(ch, subredditsSetQuery, client)
+          } yield List(events, set).mkString("\n")
+
+          resp.value
+        }
+        EitherT(response)
+      } else EitherT.rightT[IO, String]("No posts to write to analytics")
 
     val program = for {
-      r     <- redis
-      ch    <- clickhouse
-      creds <- telegramCreds
-      run   <- makeRun(r, creds)
-      ch    <- sendAnalytics(ch, run.mapFilter(_.toOption), client)
+      r          <- redis
+      ch         <- clickhouse
+      creds      <- telegramCreds
+      subreddits <- getSubredditsM(r)
+      run        <- makeRun(subreddits, r, creds)
+      ch         <- analyticsInserts(ch, run.mapFilter(_.toOption), subreddits, client)
       _ = println(ch)
     } yield run
 
